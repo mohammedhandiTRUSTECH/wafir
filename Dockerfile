@@ -7,7 +7,7 @@ COPY frontend/ ./
 RUN npm run build:prod
 
 # --- Stage 2: PHP backend + node proxy, single runtime image ---
-FROM php:8.3-cli-bookworm
+FROM php:8.4-cli-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git unzip libzip-dev libsqlite3-dev libpng-dev libonig-dev libxml2-dev nodejs npm \
