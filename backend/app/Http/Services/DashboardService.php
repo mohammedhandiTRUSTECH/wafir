@@ -256,6 +256,56 @@ class DashboardService
     }
 
     /**
+     * Sales-rep table columns. Avg is rounded first so:
+     *   Avg Daily  = month actual / working days gone
+     *   Forecast   = Avg Daily × working days in the month
+     *   Forecast % = Forecast / month target
+     *   Commission = range actual × rate(forecast %)
+     *
+     * @return array{
+     *   avg_daily_sales: float,
+     *   forecast: float,
+     *   achievement: float,
+     *   actual_achievement: float,
+     *   commission_pct: float,
+     *   commission_amount: float,
+     *   forecast_commission: float
+     * }
+     */
+    public function computeRepTableMetrics(
+        float $monthActual,
+        float $rangeActual,
+        float $monthTarget,
+        float $rangeTarget,
+        int $monthDaysGone,
+        int $monthDaysTotal,
+        string $role = 'rep'
+    ): array {
+        $avgDaily = $monthDaysGone > 0
+            ? round($monthActual / $monthDaysGone, 2)
+            : 0.0;
+        $forecast = round($avgDaily * max(0, $monthDaysTotal), 2);
+        $achievement = $monthTarget > 0
+            ? round(($forecast / $monthTarget) * 100, 2)
+            : 0.0;
+        $actualAch = $rangeTarget > 0
+            ? round(($rangeActual / $rangeTarget) * 100, 2)
+            : 0.0;
+        $rate = $this->localRules->commissionRateForAchievement($role, $achievement);
+        $hasTarget = $rangeTarget > 0;
+
+        return [
+            'avg_daily_sales'     => $avgDaily,
+            'forecast'            => $forecast,
+            'achievement'         => $achievement,
+            'actual_achievement'  => $hasTarget ? $actualAch : 0.0,
+            'commission_pct'      => $hasTarget ? $rate : 0.0,
+            'commission_amount'   => $hasTarget ? round(($rangeActual * $rate) / 100, 2) : 0.0,
+            'forecast_commission' => $hasTarget ? round(($forecast * $rate) / 100, 2) : 0.0,
+        ];
+    }
+
+    /**
      * Metrics for an ERP salesperson OID over a date range (defaults to month-to-date).
      * Actual sales follow the selected range; forecast is always the calendar-month projection.
      */
@@ -267,8 +317,8 @@ class DashboardService
         ?int $erpId = null
     ): array
     {
-        $asOf  = Carbon::now()->startOfDay();
-        $end   = $toDate ? Carbon::parse($toDate)->startOfDay() : $asOf->copy();
+        $today = Carbon::now()->startOfDay();
+        $end   = $toDate ? Carbon::parse($toDate)->startOfDay() : $today->copy();
         $start = $fromDate
             ? Carbon::parse($fromDate)->startOfDay()
             : $end->copy()->startOfMonth();
@@ -277,8 +327,12 @@ class DashboardService
             [$start, $end] = [$end->copy(), $start->copy()];
         }
 
-        $salesEnd = $end->gt($asOf) ? $asOf : $end;
-        $workingDays = $this->workingDaysInRange($start, $end, $asOf);
+        // Actual follows the picked range. Forecast/avg daily always use the
+        // full calendar month through today (or through month-end if the month is over).
+        $rangeAsOf = $end->lt($today) ? $end->copy() : $today->copy();
+
+        $salesEnd = $end->gt($rangeAsOf) ? $rangeAsOf : $end;
+        $workingDays = $this->workingDaysInRange($start, $end, $rangeAsOf);
         $workingDaysTotal = $workingDays['total'];
         $workingDaysGone  = $workingDays['gone'];
 
@@ -289,37 +343,45 @@ class DashboardService
         );
 
         [$monthStart, $monthEnd] = $this->forecastMonthBounds($start, $end);
-        $monthSalesEnd = $monthEnd->gt($asOf) ? $asOf : $monthEnd;
-        $monthWorking  = $this->workingDaysInRange($monthStart, $monthEnd, $asOf);
+        $forecastAsOf = $monthEnd->lt($today) ? $monthEnd->copy() : $today->copy();
+        $monthSalesEnd = $monthEnd->gt($forecastAsOf) ? $forecastAsOf : $monthEnd;
+        $monthWorking  = $this->workingDaysInRange($monthStart, $monthEnd, $forecastAsOf);
         $monthActual   = $this->erp->getTotalSalesValue(
             $monthStart->format('Y-m-d'),
             $monthSalesEnd->format('Y-m-d'),
             $oid
         );
-        $avgDaily    = $monthActual / $monthWorking['gone'];
-        $forecast    = $avgDaily * $monthWorking['total'];
         $target      = $this->rangeTarget($repName, $erpId, $start, $end);
         $monthTarget = $this->rangeTarget($repName, $erpId, $monthStart, $monthEnd);
-        $targetDays  = $this->workingDaysInCoveredMonths($start, $end, $asOf)['total'];
+        $targetDays  = $this->workingDaysInCoveredMonths($start, $end, $rangeAsOf)['total'];
         $dailyTarget = $targetDays > 0 ? round($target / $targetDays, 2) : 0.0;
-        $achievement = $monthTarget > 0 ? round(($forecast / $monthTarget) * 100, 2) : 0.0;
-        $actualAch   = $target > 0 ? round(($actual / $target) * 100, 2) : 0.0;
-        $rate        = $this->localRules->commissionRateForAchievement('rep', $achievement);
-        $commission  = round(($actual * $rate) / 100, 2);
+        $metrics     = $this->computeRepTableMetrics(
+            $monthActual,
+            $actual,
+            $monthTarget,
+            $target,
+            (int) $monthWorking['gone'],
+            (int) $monthWorking['total']
+        );
 
         return [
             'actual'               => round($actual, 2),
-            'forecast'             => round($forecast, 2),
+            'forecast'             => $metrics['forecast'],
+            'avg_daily_sales'      => $metrics['avg_daily_sales'],
             'target'               => round($target, 2),
             'daily_target'         => $dailyTarget,
-            'commission_amount'    => $target > 0 ? $commission : 0.0,
-            'commission_pct'       => $target > 0 ? $rate : 0.0,
-            'achievement'          => $monthTarget > 0 ? $achievement : 0.0,
-            'actual_achievement'   => $target > 0 ? $actualAch : 0.0,
+            'commission_amount'    => $metrics['commission_amount'],
+            'forecast_commission'  => $metrics['forecast_commission'],
+            'commission_pct'       => $metrics['commission_pct'],
+            'achievement'          => $metrics['achievement'],
+            'actual_achievement'   => $metrics['actual_achievement'],
             'working_days_total'   => $workingDaysTotal,
             'working_days_gone'    => $workingDaysGone,
             'forecast_month'       => $monthStart->format('Y-m'),
             'month_target'         => round($monthTarget, 2),
+            'month_actual'         => round($monthActual, 2),
+            'month_working_days_total' => $monthWorking['total'],
+            'month_working_days_gone'  => $monthWorking['gone'],
         ];
     }
 
@@ -330,8 +392,8 @@ class DashboardService
     {
         if (!$rep->oid) {
             return [
-                'actual' => 0.0, 'forecast' => 0.0, 'target' => 0.0, 'daily_target' => 0.0,
-                'commission_amount' => 0.0, 'commission_pct' => 0.0, 'achievement' => 0.0,
+                'actual' => 0.0, 'forecast' => 0.0, 'avg_daily_sales' => 0.0, 'target' => 0.0, 'daily_target' => 0.0,
+                'commission_amount' => 0.0, 'forecast_commission' => 0.0, 'commission_pct' => 0.0, 'achievement' => 0.0,
                 'actual_achievement' => 0.0, 'working_days_total' => 0, 'working_days_gone' => 0,
             ];
         }
@@ -350,19 +412,21 @@ class DashboardService
      */
     public function prefetchCurrentMonthTotals(array $oids, ?string $fromDate = null, ?string $toDate = null): void
     {
-        $asOf  = Carbon::now()->startOfDay();
-        $end   = $toDate ? Carbon::parse($toDate)->startOfDay() : $asOf->copy();
+        $today = Carbon::now()->startOfDay();
+        $end   = $toDate ? Carbon::parse($toDate)->startOfDay() : $today->copy();
         $start = $fromDate
             ? Carbon::parse($fromDate)->startOfDay()
             : $end->copy()->startOfMonth();
         if ($start->gt($end)) {
             [$start, $end] = [$end->copy(), $start->copy()];
         }
+        $rangeAsOf = $end->lt($today) ? $end->copy() : $today->copy();
 
-        $rangeEnd = ($end->gt($asOf) ? $asOf : $end)->format('Y-m-d');
+        $rangeEnd = ($end->gt($rangeAsOf) ? $rangeAsOf : $end)->format('Y-m-d');
         $rangeStart = $start->format('Y-m-d');
         [$monthStart, $monthEnd] = $this->forecastMonthBounds($start, $end);
-        $monthEndClamped = ($monthEnd->gt($asOf) ? $asOf : $monthEnd)->format('Y-m-d');
+        $forecastAsOf = $monthEnd->lt($today) ? $monthEnd->copy() : $today->copy();
+        $monthEndClamped = ($monthEnd->gt($forecastAsOf) ? $forecastAsOf : $monthEnd)->format('Y-m-d');
         $monthStartDate  = $monthStart->format('Y-m-d');
 
         $queries = [];
@@ -538,6 +602,7 @@ class DashboardService
                 'actual'       => $calc['actual'],
                 'actual_sales' => $calc['actual'],
                 'forecast'     => $calc['forecast'],
+                'avg_daily_sales' => $calc['avg_daily_sales'] ?? 0.0,
                 'achievement'  => $calc['achievement'],
                 'actual_achievement' => $calc['actual_achievement'],
                 'commission'   => $calc['commission_amount'],

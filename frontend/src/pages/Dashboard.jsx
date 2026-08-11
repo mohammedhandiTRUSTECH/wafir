@@ -28,6 +28,59 @@ import api from "../services/api";
 
 const fmt = (n) => <>{Number(n || 0).toLocaleString()} <span className="icon-saudi_riyal">&#xea;</span></>;
 const fmtPct = (n) => Number(n || 0).toFixed(1) + "%";
+const fmtSigned = (n) => {
+  const v = Number(n || 0);
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  return (
+    <>
+      {sign}
+      {Math.abs(v).toLocaleString()} <span className="icon-saudi_riyal">&#xea;</span>
+    </>
+  );
+};
+
+function paceStatus(paceDelta) {
+  if (!Number.isFinite(paceDelta)) return { label: "—", tone: "neutral" };
+  if (paceDelta >= 2) return { label: "Ahead", tone: "good" };
+  if (paceDelta <= -2) return { label: "Behind", tone: "bad" };
+  return { label: "On pace", tone: "ok" };
+}
+
+function forecastStatus(pct, hasTarget) {
+  if (!hasTarget) return { label: "No target", tone: "neutral" };
+  if (pct >= 100) return { label: "Hit", tone: "good" };
+  if (pct >= 90) return { label: "At risk", tone: "warn" };
+  return { label: "Miss", tone: "bad" };
+}
+
+const chipTone = {
+  good: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+  ok: "bg-sky-50 text-sky-700 ring-1 ring-sky-200",
+  warn: "bg-amber-50 text-amber-800 ring-1 ring-amber-200",
+  bad: "bg-rose-50 text-rose-700 ring-1 ring-rose-200",
+  neutral: "bg-gray-100 text-gray-600 ring-1 ring-gray-200",
+};
+
+const StatusChip = ({ label, tone = "neutral" }) => (
+  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${chipTone[tone] || chipTone.neutral}`}>
+    {label}
+  </span>
+);
+
+function CompareBar({ valuePct, left, right }) {
+  const width = Math.min(Math.max(Number(valuePct) || 0, 0), 100);
+  return (
+    <div className="mt-3">
+      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+        <div className="h-full rounded-full bg-zinc-900 transition-[width] duration-500" style={{ width: `${width}%` }} />
+      </div>
+      <div className="mt-1.5 flex justify-between gap-3 text-[11px] tabular-nums text-gray-500">
+        <span>{left}</span>
+        <span className="text-right">{right}</span>
+      </div>
+    </div>
+  );
+}
 
 const salesColumns = [
   {
@@ -54,8 +107,9 @@ const salesColumns = [
     cell: ({ getValue }) => fmt(getValue()),
     sortingFn: (a, b) => a.original.target - b.original.target,
   },
-  { accessorKey: "actual",   header: "Actual Sales", cell: ({ getValue }) => fmt(getValue()) },
-  { accessorKey: "forecast", header: "Forecast",     cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "actual",          header: "Actual Sales",    cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "avg_daily_sales", header: "Avg Daily Sales", cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "forecast",        header: "Forecast",        cell: ({ getValue }) => fmt(getValue()) },
   {
     accessorKey: "achievement",
     header: "Forecast Ach.",
@@ -108,6 +162,14 @@ function formatRangeLabel(from, to) {
   return `${a} – ${b}`;
 }
 
+function formatDayLabel(ymd) {
+  return new Date(ymd + "T00:00:00").toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function formatMonthLabel(ym) {
   const [y, m] = (ym || "").split("-").map(Number);
   if (!y || !m) return ym || "";
@@ -150,7 +212,7 @@ export default function Dashboard() {
   const [workingDaysInput, setWorkingDaysInput] = useState("");
   const [savingDays, setSavingDays] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [expandedChart, setExpandedChart] = useState(null); // "sales" | "commission" | null
+  const [expandedChart, setExpandedChart] = useState(null); // "sales" | "commission" | "commission-forecast" | null
   const [daysOpen, setDaysOpen] = useState(false);
   const [monthOpen, setMonthOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState(() => Number(initialSelection.month.split("-")[0]));
@@ -231,6 +293,7 @@ export default function Dashboard() {
   const salesReps = data?.sales_reps || [];
   const chartSales = data?.chart_sales_vs_target || { labels: [], actual: [], daily_target: [] };
   const chartComm = data?.chart_commission || { labels: [], data: [] };
+  const chartCommForecast = data?.chart_commission_forecast || { labels: [], data: [] };
 
   const workingDaysLabel = stats.working_days_total
     ? `${stats.working_days_gone || 0} / ${stats.working_days_total} working days`
@@ -261,6 +324,9 @@ export default function Dashboard() {
       : 0);
 
   const rangeLabel = formatRangeLabel(queryRange.from, queryRange.to);
+  const todayYmd = toYmd(new Date());
+  const untilDate = queryRange.to < todayYmd ? queryRange.to : todayYmd;
+  const untilDayLabel = formatDayLabel(untilDate);
   const daysGone = Number(stats.working_days_gone || 0);
   const daysTotal = Number(stats.working_days_total || 0);
   const daysRemain = Math.max(0, daysTotal - daysGone);
@@ -268,6 +334,16 @@ export default function Dashboard() {
   const daysHint = stats.working_days_override
     ? "saved override"
     : "Fridays excluded";
+
+  const avgDailySales = Number(stats.avg_daily_sales || 0);
+  const salesGap = Math.max(0, monthlyTarget - totalSales);
+  const forecastGap = Math.max(0, forecastMonthTarget - totalForecast);
+  const forecastOver = Math.max(0, totalForecast - forecastMonthTarget);
+  const dailyVariance = avgDailySales - dailyTarget;
+  const dailyHitPct = dailyTarget > 0 ? (avgDailySales / dailyTarget) * 100 : 0;
+  const paceDelta = actualAchievement - daysPct;
+  const monthPace = paceStatus(paceDelta);
+  const closeOutlook = forecastStatus(forecastAchievement, forecastMonthTarget > 0);
 
   const enterRangeMode = () => {
     if (mode !== "range") {
@@ -511,9 +587,6 @@ export default function Dashboard() {
                   <span className="text-sm font-medium text-gray-900">
                     {daysGone} / {daysTotal} working days
                   </span>
-                  <span className="text-xs text-gray-400">
-                    {mode === "range" ? rangeLabel : daysHint}
-                  </span>
                 </div>
                 <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-gray-100">
                   <div
@@ -521,6 +594,31 @@ export default function Dashboard() {
                     style={{ width: `${daysPct}%` }}
                   />
                 </div>
+                <dl className="mt-3 grid gap-1.5 sm:grid-cols-2">
+                  {[
+                    {
+                      label: "Month",
+                      value: formatMonthLabel(mode === "range" ? forecastMonth : month),
+                      swatch: "bg-zinc-500",
+                    },
+                    {
+                      label: "Range",
+                      value: rangeLabel,
+                      swatch: "bg-zinc-400",
+                    },
+                  ].map((row) => (
+                    <div
+                      key={row.label}
+                      className="flex items-center justify-between gap-3 rounded-xl bg-gray-50 px-3 py-2"
+                    >
+                      <dt className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                        <span className={`h-1.5 w-1.5 rounded-full ${row.swatch}`} />
+                        {row.label}
+                      </dt>
+                      <dd className="text-right text-sm font-semibold text-gray-900">{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
               </div>
 
               <dl className="grid grid-cols-3 gap-2 sm:flex sm:w-56 sm:shrink-0 sm:flex-col sm:gap-1.5">
@@ -552,58 +650,106 @@ export default function Dashboard() {
         <>
           {/* Stats Cards */}
           <div className="mb-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            <TargetCard target={stats.monthly_target} achievement={actualAchievement} />
-            <StatCard
+            <TargetCard
+              target={monthlyTarget}
+              achievement={actualAchievement}
+              timePct={daysPct}
+              gap={salesGap}
+              status={monthPace}
+            />
+            <MetricCard
               title="Total Sales"
-              value={fmt(stats.total_sales)}
-              change={`${fmtPct(actualAchievement)} of target`}
               icon={<FaDollarSign />}
+              value={fmt(totalSales)}
+              chip={<StatusChip label={fmtPct(actualAchievement)} tone={monthPace.tone} />}
+              bar={
+                <CompareBar
+                  valuePct={actualAchievement}
+                  left={`Booked ${fmtPct(actualAchievement)}`}
+                  right="of target 100%"
+                />
+              }
+              rows={[{ label: "Gap to target", value: fmt(salesGap) }]}
             />
-            <StatCard
+            <MetricCard
               title="Daily Target"
-              value={fmt(dailyTarget)}
               icon={<FaCalendarDay />}
+              value={fmt(dailyTarget)}
+              chip={<StatusChip label={daysRemain > 0 ? `${daysRemain} days left` : "Closed"} tone="neutral" />}
+              bar={
+                <CompareBar
+                  valuePct={dailyHitPct}
+                  left={<>Avg {fmt(avgDailySales)}</>}
+                  right={<>Plan {fmt(dailyTarget)}</>}
+                />
+              }
+              rows={[
+                daysRemain > 0
+                  ? { label: "Working days", value: workingDaysLabel }
+                  : { label: "Month is closed", value: "" },
+              ]}
             />
-            <StatCard title="Avg Daily Sales" value={fmt(stats.avg_daily_sales)} change={workingDaysLabel} icon={<FaWaveSquare />} />
-            <StatCard
+            <MetricCard
+              title="Avg Daily Sales"
+              icon={<FaWaveSquare />}
+              value={fmt(avgDailySales)}
+              chip={
+                <StatusChip
+                  label={
+                    dailyTarget > 0
+                      ? `${dailyHitPct >= 100 ? "+" : ""}${fmtPct(dailyHitPct - 100)} vs tgt`
+                      : "No daily tgt"
+                  }
+                  tone={dailyTarget <= 0 ? "neutral" : dailyVariance >= 0 ? "good" : "bad"}
+                />
+              }
+              bar={
+                <CompareBar
+                  valuePct={dailyHitPct}
+                  left={`${fmtPct(dailyHitPct)} of daily target`}
+                  right={fmt(dailyTarget)}
+                />
+              }
+              rows={[
+                { label: "Vs daily target", value: fmtSigned(dailyVariance), className: dailyVariance >= 0 ? "text-emerald-700" : "text-rose-700" },
+              ]}
+            />
+            <MetricCard
               title="Total Forecast"
-              value={fmt(stats.total_forecast)}
-              change={`${fmtPct(forecastAchievement)} of ${formatMonthLabel(forecastMonth)} target`}
               icon={<FaChartLine />}
+              value={fmt(totalForecast)}
+              chip={<StatusChip label={`${fmtPct(forecastAchievement)} of target`} tone={closeOutlook.tone} />}
+              bar={
+                <CompareBar
+                  valuePct={forecastAchievement}
+                  left={`Forecast ${fmtPct(forecastAchievement)}`}
+                  right="of target 100%"
+                />
+              }
+              rows={[
+                {
+                  label: forecastOver > 0 ? "Over target" : "Left to target",
+                  value: fmt(forecastOver > 0 ? forecastOver : forecastGap),
+                },
+              ]}
             />
             <ForecastAchievementCard
               forecast={totalForecast}
               target={forecastMonthTarget}
               monthLabel={formatMonthLabel(forecastMonth)}
               achievement={forecastAchievement}
+              outlook={closeOutlook}
             />
           </div>
 
-          {/* Charts */}
-          <div className="mb-10 grid gap-6 md:grid-cols-2">
+          {/* Charts: earned + forecast side by side, sales vs target full width */}
+          <div className="mb-6 grid gap-6 lg:grid-cols-2">
             <div className="rounded-2xl border bg-white p-6">
-              <div className="mb-4 flex items-center justify-between gap-2">
-                <h3 className="font-medium">Sales vs Target ({rangeLabel})</h3>
-                <button
-                  type="button"
-                  onClick={() => setExpandedChart("sales")}
-                  className="rounded-lg border p-1.5 text-gray-500 hover:bg-gray-50 hover:text-gray-800"
-                  title="Expand chart"
-                >
-                  <ArrowsPointingOutIcon className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="h-56">
-                <SalesVsTargetChart
-                  labels={chartSales.labels}
-                  actual={chartSales.actual}
-                  dailyTarget={chartSales.daily_target}
-                />
-              </div>
-            </div>
-            <div className="rounded-2xl border bg-white p-6">
-              <div className="mb-4 flex items-center justify-between gap-2">
-                <h3 className="font-medium">Commission Earned by Sales Rep</h3>
+              <div className="mb-4 flex items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-medium">Commission Earned by Sales Rep</h3>
+                  <p className="mt-0.5 text-xs text-gray-500">Until {untilDayLabel}</p>
+                </div>
                 <button
                   type="button"
                   onClick={() => setExpandedChart("commission")}
@@ -614,8 +760,57 @@ export default function Dashboard() {
                 </button>
               </div>
               <div className="h-72">
-                <CommissionChart labels={chartComm.labels} data={chartComm.data} />
+                <CommissionChart
+                  labels={chartComm.labels}
+                  data={chartComm.data}
+                  datasetLabel="Commission earned"
+                />
               </div>
+            </div>
+            <div className="rounded-2xl border bg-white p-6">
+              <div className="mb-4 flex items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-medium">Forecast Commission by Sales Rep</h3>
+                  <p className="mt-0.5 text-xs text-gray-500">{formatMonthLabel(forecastMonth)} projection</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExpandedChart("commission-forecast")}
+                  className="rounded-lg border p-1.5 text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                  title="Expand chart"
+                >
+                  <ArrowsPointingOutIcon className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="h-72">
+                <CommissionChart
+                  labels={chartCommForecast.labels}
+                  data={chartCommForecast.data}
+                  datasetLabel="Forecast commission"
+                  color="#10b981"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-10 rounded-2xl border bg-white p-6">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h3 className="font-medium">Sales vs Target ({rangeLabel})</h3>
+              <button
+                type="button"
+                onClick={() => setExpandedChart("sales")}
+                className="rounded-lg border p-1.5 text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                title="Expand chart"
+              >
+                <ArrowsPointingOutIcon className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="h-72">
+              <SalesVsTargetChart
+                labels={chartSales.labels}
+                actual={chartSales.actual}
+                dailyTarget={chartSales.daily_target}
+              />
             </div>
           </div>
 
@@ -635,10 +830,30 @@ export default function Dashboard() {
 
           {expandedChart === "commission" && (
             <ChartExpandModal
-              title="Commission Earned by Sales Rep"
+              title={`Commission Earned by Sales Rep (until ${untilDayLabel})`}
               onClose={() => setExpandedChart(null)}
             >
-              <CommissionChart labels={chartComm.labels} data={chartComm.data} expanded />
+              <CommissionChart
+                labels={chartComm.labels}
+                data={chartComm.data}
+                datasetLabel="Commission earned"
+                expanded
+              />
+            </ChartExpandModal>
+          )}
+
+          {expandedChart === "commission-forecast" && (
+            <ChartExpandModal
+              title={`Forecast Commission by Sales Rep (${formatMonthLabel(forecastMonth)})`}
+              onClose={() => setExpandedChart(null)}
+            >
+              <CommissionChart
+                labels={chartCommForecast.labels}
+                data={chartCommForecast.data}
+                datasetLabel="Forecast commission"
+                color="#10b981"
+                expanded
+              />
             </ChartExpandModal>
           )}
 
@@ -716,103 +931,128 @@ function SalesRepsTable({ data }) {
   );
 }
 
-const StatCard = ({ title, value, change, icon, changeClassName = "text-gray-500" }) => (
-  <div className="rounded-2xl border bg-white p-6">
-    <div className="mb-3 flex items-center justify-between">
-      <p className="text-base font-semibold text-gray-800">{title}</p>
-      <div className="rounded-md bg-gray-100 p-1.5 text-gray-500">{icon}</div>
+const MetricCard = ({ title, icon, value, chip, bar, rows = [] }) => (
+  <div className="flex h-full flex-col rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+    <div className="mb-3 flex items-start justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="rounded-md bg-gray-100 p-1.5 text-gray-500">{icon}</div>
+        <p className="text-lg font-semibold text-gray-800">{title}</p>
+      </div>
+      {chip}
     </div>
-    <p className="mb-1 text-2xl font-semibold tracking-tight text-gray-900">{value}</p>
-    {change != null && change !== "" && (
-      <p className={`text-sm ${changeClassName}`}>{change}</p>
+    <p className="text-2xl font-semibold tracking-tight text-gray-900 tabular-nums">{value}</p>
+    {bar}
+    <div className="min-h-3 flex-1" />
+    {rows.length > 0 && (
+      <dl className="mt-3 space-y-1.5 border-t border-gray-100 pt-3">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center justify-between gap-3 text-sm">
+            <dt className="text-gray-500">{row.label}</dt>
+            {row.value !== "" && row.value != null && (
+              <dd className={`text-right font-medium tabular-nums ${row.className || "text-gray-900"}`}>{row.value}</dd>
+            )}
+          </div>
+        ))}
+      </dl>
     )}
   </div>
 );
 
-const ForecastAchievementCard = ({ forecast, target, monthLabel, achievement }) => {
+const ForecastAchievementCard = ({ forecast, target, monthLabel, achievement, outlook }) => {
   const pct = Math.max(0, Number(achievement) || 0);
   const hasTarget = Number(target) > 0;
   const over = hasTarget && pct >= 100;
-  const onPace = hasTarget && pct >= 80;
   const remaining = Math.max(0, Number(target) - Number(forecast));
   const ringPct = Math.min(pct, 100);
-  const radius = 36;
+  const radius = 58;
   const circ = 2 * Math.PI * radius;
   const dash = (ringPct / 100) * circ;
   const shortMonth = (monthLabel || "").replace(/\s+\d{4}$/, "") || monthLabel;
-  const tone = over
-    ? { text: "text-emerald-700", ring: "#059669", wash: "from-emerald-50 via-white to-teal-50", chip: "bg-emerald-600 text-white", bar: "bg-emerald-500", glow: "bg-emerald-300/50" }
-    : onPace
-      ? { text: "text-sky-700", ring: "#0284c7", wash: "from-sky-50 via-white to-indigo-50", chip: "bg-sky-600 text-white", bar: "bg-sky-500", glow: "bg-sky-300/50" }
-      : { text: "text-amber-700", ring: "#d97706", wash: "from-amber-50 via-white to-orange-50", chip: "bg-amber-600 text-white", bar: "bg-amber-500", glow: "bg-amber-300/50" };
+  const tone = outlook?.tone === "good"
+    ? { text: "text-emerald-700", ring: "#059669", wash: "from-emerald-50 via-white to-teal-50", bar: "bg-emerald-500", glow: "bg-emerald-300/50" }
+    : outlook?.tone === "warn"
+      ? { text: "text-amber-700", ring: "#d97706", wash: "from-amber-50 via-white to-orange-50", bar: "bg-amber-500", glow: "bg-amber-300/50" }
+      : outlook?.tone === "bad"
+        ? { text: "text-rose-700", ring: "#e11d48", wash: "from-rose-50 via-white to-orange-50", bar: "bg-rose-500", glow: "bg-rose-300/50" }
+        : { text: "text-sky-700", ring: "#0284c7", wash: "from-sky-50 via-white to-indigo-50", bar: "bg-sky-500", glow: "bg-sky-300/50" };
 
   return (
-    <div className={`relative overflow-hidden rounded-2xl border border-black/5 bg-gradient-to-br ${tone.wash} p-6`}>
+    <div className={`relative flex h-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-gradient-to-br ${tone.wash} p-6 shadow-sm`}>
       <div className={`pointer-events-none absolute -right-6 -top-8 h-28 w-28 rounded-full ${tone.glow} blur-2xl`} />
       <div className="mb-3 flex items-center justify-between gap-2">
-        <p className="text-base font-semibold text-gray-800">Forecast Achievement</p>
-        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold shadow-sm ${tone.chip}`}>
-          <LockClosedIcon className="h-3 w-3" />
-          {shortMonth}
-        </span>
-      </div>
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className={`text-[2rem] font-semibold leading-none tracking-tight ${tone.text}`}>
-            {hasTarget ? `${pct.toFixed(1)}%` : "—"}
-          </p>
-          <p className="mt-1.5 text-xs font-medium uppercase tracking-wide text-gray-500">
-            {over ? "Above month target" : onPace ? "On pace for month" : "Behind month pace"}
-          </p>
+        <p className="text-lg font-semibold text-gray-800">Forecast Achievement</p>
+        <div className="flex items-center gap-1.5">
+          <StatusChip label={outlook?.label || "—"} tone={outlook?.tone || "neutral"} />
+          <span className="inline-flex items-center gap-1 rounded-full bg-white/80 px-2 py-0.5 text-[11px] font-semibold text-gray-600 ring-1 ring-gray-200">
+            <LockClosedIcon className="h-3 w-3" />
+            {shortMonth}
+          </span>
         </div>
-        <div className="relative h-[88px] w-[88px] shrink-0">
-          <svg viewBox="0 0 88 88" className="-rotate-90 h-full w-full">
-            <circle cx="44" cy="44" r={radius} fill="none" stroke="rgba(15,23,42,0.08)" strokeWidth="8" />
+      </div>
+      <div className="flex flex-1 items-center justify-center py-1">
+        <div className="relative h-[168px] w-[168px]">
+          <svg viewBox="0 0 144 144" className="-rotate-90 h-full w-full">
+            <circle cx="72" cy="72" r={radius} fill="none" stroke="rgba(15,23,42,0.08)" strokeWidth="14" />
             <circle
-              cx="44"
-              cy="44"
+              cx="72"
+              cy="72"
               r={radius}
               fill="none"
               stroke={tone.ring}
-              strokeWidth="8"
+              strokeWidth="14"
               strokeLinecap="round"
               strokeDasharray={`${dash} ${circ}`}
               className="transition-[stroke-dasharray] duration-700 ease-out"
             />
           </svg>
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <span className={`text-xs font-bold ${tone.text}`}>{hasTarget ? `${Math.round(ringPct)}%` : "—"}</span>
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+            <span className={`text-2xl font-semibold tabular-nums ${tone.text}`}>
+              {hasTarget ? `${pct.toFixed(1)}%` : "—"}
+            </span>
+            <span className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+             
+            </span>
           </div>
         </div>
       </div>
-      <div className="mt-4">
-        <div className="mb-1.5 h-1.5 overflow-hidden rounded-full bg-black/10">
-          <div
-            className={`h-full rounded-full ${tone.bar} transition-[width] duration-700`}
-            style={{ width: `${hasTarget ? ringPct : 0}%` }}
-          />
-        </div>
-        <div className="flex items-center justify-between text-xs text-gray-600">
-          <span>{fmt(forecast)}</span>
-          <span className="text-gray-400">{over ? "over target" : <>{fmt(remaining)} left</>}</span>
-          <span>{fmt(target)}</span>
-        </div>
+      <div className="mt-auto flex items-center justify-between pt-2 text-xs tabular-nums text-gray-600">
+        <span>{fmt(forecast)}</span>
+        <span className="text-gray-400">{over ? "over target" : <>{fmt(remaining)} left</>}</span>
+        <span>{fmt(target)}</span>
       </div>
     </div>
   );
 };
 
-const TargetCard = ({ target, achievement }) => (
-  <div className="rounded-2xl border bg-white p-6">
-    <div className="mb-3 flex items-center justify-between">
-      <p className="text-base font-semibold text-gray-800">Target</p>
-      <div className="rounded-md bg-gray-100 p-1.5 text-gray-500"><FaBullseye /></div>
+const TargetCard = ({ target, achievement, timePct, gap, status }) => (
+  <div className="flex h-full flex-col rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+    <div className="mb-3 flex items-start justify-between gap-2">
+      <div className="flex items-center gap-2">
+        <div className="rounded-md bg-gray-100 p-1.5 text-gray-500"><FaBullseye /></div>
+        <p className="text-lg font-semibold text-gray-800">Target</p>
+      </div>
+      <StatusChip label={status?.label || "—"} tone={status?.tone || "neutral"} />
     </div>
-    <p className="mb-3 text-2xl font-semibold tracking-tight text-gray-900">{fmt(target)}</p>
-    <div className="mb-2 h-2 rounded-full bg-gray-200">
-      <div className="h-2 rounded-full bg-black" style={{ width: `${Math.min(achievement || 0, 100)}%` }} />
+    <p className="text-2xl font-semibold tracking-tight text-gray-900 tabular-nums">{fmt(target)}</p>
+    <div className="mt-3 space-y-1.5">
+      <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+        <div className="h-full rounded-full bg-zinc-900" style={{ width: `${Math.min(achievement || 0, 100)}%` }} />
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
+        <div className="h-full rounded-full bg-zinc-400" style={{ width: `${Math.min(timePct || 0, 100)}%` }} />
+      </div>
+      <div className="flex justify-between text-[11px] tabular-nums text-gray-500">
+        <span>Sales {fmtPct(achievement)}</span>
+        <span>Time {fmtPct(timePct)}</span>
+      </div>
     </div>
-    <p className="text-sm text-gray-500">{Number(achievement || 0).toFixed(1)}% achieved</p>
+    <div className="min-h-3 flex-1" />
+    <dl className="mt-3 border-t border-gray-100 pt-3">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <dt className="text-gray-500">Remaining</dt>
+        <dd className="font-medium tabular-nums text-gray-900">{fmt(gap)}</dd>
+      </div>
+    </dl>
   </div>
 );
 

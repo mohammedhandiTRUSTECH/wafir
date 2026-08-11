@@ -122,7 +122,7 @@ class AdminSalesRepController extends Controller
                     'monthly_target'    => $calc['target'],
                     'total_forecast'    => $calc['forecast'],
                     'commission_earned' => $calc['commission_amount'],
-                    'avg_daily_sales'   => $this->svc->avgDailySales($calc['actual']),
+                    'avg_daily_sales'   => $calc['avg_daily_sales'] ?? $this->svc->avgDailySales($calc['actual']),
                     'achievement'       => $calc['achievement'],
                     'forecast_achievement' => $calc['achievement'],
                     'actual_achievement'   => $calc['actual_achievement'],

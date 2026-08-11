@@ -43,11 +43,13 @@ class AdminDashboardController extends Controller
         $repRows       = [];
         $totalSales    = 0;
         $totalForecast = 0;
+        $totalMonthSales = 0.0;
 
         foreach ($salesReps as $person) {
             $calc = $this->svc->getOidCurrentMonth($person['oid'], $fromDate, $toDate, $person['name'], (int) $person['id']);
             $totalSales    += $calc['actual'];
             $totalForecast += $calc['forecast'];
+            $totalMonthSales += $calc['month_actual'] ?? $calc['actual'];
 
             $repRows[] = [
                 'id'          => $person['id'],
@@ -56,12 +58,14 @@ class AdminDashboardController extends Controller
                 'supervisor'  => $this->svc->localRules()->supervisorNameForRep($person['name']),
                 'target'      => $calc['target'],
                 'actual'      => $calc['actual'],
+                'avg_daily_sales' => $calc['avg_daily_sales'] ?? 0.0,
                 'forecast'    => $calc['forecast'],
                 'achievement' => $calc['achievement'],
                 'actual_achievement' => $calc['actual_achievement'],
                 'month_target'=> $calc['month_target'] ?? $calc['target'],
                 'commission_pct' => $calc['commission_pct'],
                 'commission'  => $calc['commission_amount'],
+                'forecast_commission' => $calc['forecast_commission'] ?? 0.0,
                 'success'     => $calc['achievement'] >= 100,
             ];
         }
@@ -90,6 +94,7 @@ class AdminDashboardController extends Controller
         $dailySales    = $this->svc->getAggregatedDailySalesByRange($allOids, $fromDate, $toDate);
         $periodTarget  = round(collect($repRows)->sum('target'), 2);
         [$forecastMonthStart, $forecastMonthEnd] = $this->svc->forecastMonthBounds($from, $to);
+        $monthWorkingDays = $this->svc->workingDaysInRange($forecastMonthStart, $forecastMonthEnd, $asOf);
         $forecastMonthTarget = 0.0;
         foreach ($salesReps as $person) {
             $forecastMonthTarget += $this->svc->rangeTarget(
@@ -110,10 +115,13 @@ class AdminDashboardController extends Controller
         $commissionChart = collect($repRows)->map(fn($r) => [
             'name'       => $this->displayName($r['name']),
             'commission' => $r['commission'],
+            'forecast_commission' => $r['forecast_commission'],
         ])->toArray();
 
-        $avgDaily = $workingDays['gone'] > 0
-            ? round($totalSales / $workingDays['gone'], 2)
+        $monthDaysTotal = $monthWorkingDays['total'] ?? $workingDays['total'];
+        $monthDaysGone  = $monthWorkingDays['gone'] ?? $workingDays['gone'];
+        $avgDaily = $monthDaysGone > 0
+            ? round($totalMonthSales / $monthDaysGone, 2)
             : 0.0;
 
         // Forecast achievement (projected) — always vs the calendar-month target.
@@ -140,10 +148,12 @@ class AdminDashboardController extends Controller
                     'total_forecast'      => round($totalForecast, 2),
                     'forecast_month'      => $forecastMonthStart->format('Y-m'),
                     'forecast_month_target' => $forecastMonthTarget,
-                    'working_days_total'  => $workingDays['total'],
-                    'working_days_gone'   => $workingDays['gone'],
+                    'working_days_total'  => $monthDaysTotal,
+                    'working_days_gone'   => $monthDaysGone,
                     'working_days_auto'   => $workingDays['auto_total'],
                     'working_days_override' => $workingDays['is_override'],
+                    'range_working_days_total' => $workingDays['total'],
+                    'range_working_days_gone'  => $workingDays['gone'],
                     'from_date'           => $fromDate,
                     'to_date'             => $toDate,
                 ],
@@ -157,6 +167,10 @@ class AdminDashboardController extends Controller
                 'chart_commission' => [
                     'labels' => array_column($commissionChart, 'name'),
                     'data'   => array_column($commissionChart, 'commission'),
+                ],
+                'chart_commission_forecast' => [
+                    'labels' => array_column($commissionChart, 'name'),
+                    'data'   => array_column($commissionChart, 'forecast_commission'),
                 ],
                 'source' => 'erp_api_with_local_rules',
             ],

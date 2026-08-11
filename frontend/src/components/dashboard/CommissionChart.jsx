@@ -4,7 +4,13 @@ import { Bar } from "react-chartjs-2";
 
 const PAGE_SIZE = 10;
 
-const CommissionChart = ({ labels = [], data: values = [], expanded = false }) => {
+const CommissionChart = ({
+  labels = [],
+  data: values = [],
+  expanded = false,
+  datasetLabel = "Commission",
+  color = "#3b82f6",
+}) => {
   const [page, setPage] = useState(0);
 
   const ranked = useMemo(() => {
@@ -31,9 +37,9 @@ const CommissionChart = ({ labels = [], data: values = [], expanded = false }) =
     labels: pageLabels,
     datasets: [
       {
-        label: "Commission",
+        label: datasetLabel,
         data: pageValues,
-        backgroundColor: "#3b82f6",
+        backgroundColor: color,
         borderRadius: 8,
       },
     ],

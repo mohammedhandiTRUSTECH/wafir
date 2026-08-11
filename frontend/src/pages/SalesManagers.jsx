@@ -39,8 +39,9 @@ const salesRepsColumns = [
   { accessorKey: "name",        header: "Name" },
   { accessorKey: "supervisor",  header: "Supervisor" },
   { accessorKey: "target",      header: "Target",   cell: ({ getValue }) => fmt(getValue()) },
-  { accessorKey: "sales",       header: "Sales",    cell: ({ getValue }) => fmt(getValue()) },
-  { accessorKey: "forecast",    header: "Forecast", cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "sales",           header: "Sales",           cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "avg_daily_sales", header: "Avg Daily Sales", cell: ({ getValue }) => fmt(getValue()) },
+  { accessorKey: "forecast",        header: "Forecast",        cell: ({ getValue }) => fmt(getValue()) },
   {
     accessorKey: "achievement", header: "Forecast Ach.",
     cell: ({ getValue }) => (
