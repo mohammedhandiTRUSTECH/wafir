@@ -231,7 +231,33 @@ class DashboardService
     }
 
     /**
+     * Calendar month used for forecast. Day-to-day range tweaks inside a month
+     * do not change the projection — it always uses the full month.
+     * A range that crosses months uses the month of the end date.
+     *
+     * @return array{0: Carbon, 1: Carbon}
+     */
+    public function forecastMonthBounds(Carbon $from, Carbon $to): array
+    {
+        $from = $from->copy()->startOfDay();
+        $to   = $to->copy()->startOfDay();
+        if ($from->gt($to)) {
+            [$from, $to] = [$to->copy(), $from->copy()];
+        }
+
+        $month = ($from->year === $to->year && $from->month === $to->month)
+            ? $from
+            : $to;
+
+        return [
+            $month->copy()->startOfMonth(),
+            $month->copy()->endOfMonth()->startOfDay(),
+        ];
+    }
+
+    /**
      * Metrics for an ERP salesperson OID over a date range (defaults to month-to-date).
+     * Actual sales follow the selected range; forecast is always the calendar-month projection.
      */
     public function getOidCurrentMonth(
         string $oid,
@@ -261,12 +287,22 @@ class DashboardService
             $salesEnd->format('Y-m-d'),
             $oid
         );
-        $avgDaily    = $actual / $workingDaysGone;
-        $forecast    = $avgDaily * $workingDaysTotal;
+
+        [$monthStart, $monthEnd] = $this->forecastMonthBounds($start, $end);
+        $monthSalesEnd = $monthEnd->gt($asOf) ? $asOf : $monthEnd;
+        $monthWorking  = $this->workingDaysInRange($monthStart, $monthEnd, $asOf);
+        $monthActual   = $this->erp->getTotalSalesValue(
+            $monthStart->format('Y-m-d'),
+            $monthSalesEnd->format('Y-m-d'),
+            $oid
+        );
+        $avgDaily    = $monthActual / $monthWorking['gone'];
+        $forecast    = $avgDaily * $monthWorking['total'];
         $target      = $this->rangeTarget($repName, $erpId, $start, $end);
+        $monthTarget = $this->rangeTarget($repName, $erpId, $monthStart, $monthEnd);
         $targetDays  = $this->workingDaysInCoveredMonths($start, $end, $asOf)['total'];
         $dailyTarget = $targetDays > 0 ? round($target / $targetDays, 2) : 0.0;
-        $achievement = $target > 0 ? round(($forecast / $target) * 100, 2) : 0.0;
+        $achievement = $monthTarget > 0 ? round(($forecast / $monthTarget) * 100, 2) : 0.0;
         $actualAch   = $target > 0 ? round(($actual / $target) * 100, 2) : 0.0;
         $rate        = $this->localRules->commissionRateForAchievement('rep', $achievement);
         $commission  = round(($actual * $rate) / 100, 2);
@@ -278,10 +314,12 @@ class DashboardService
             'daily_target'         => $dailyTarget,
             'commission_amount'    => $target > 0 ? $commission : 0.0,
             'commission_pct'       => $target > 0 ? $rate : 0.0,
-            'achievement'          => $target > 0 ? $achievement : 0.0,
+            'achievement'          => $monthTarget > 0 ? $achievement : 0.0,
             'actual_achievement'   => $target > 0 ? $actualAch : 0.0,
             'working_days_total'   => $workingDaysTotal,
             'working_days_gone'    => $workingDaysGone,
+            'forecast_month'       => $monthStart->format('Y-m'),
+            'month_target'         => round($monthTarget, 2),
         ];
     }
 
@@ -312,16 +350,38 @@ class DashboardService
      */
     public function prefetchCurrentMonthTotals(array $oids, ?string $fromDate = null, ?string $toDate = null): void
     {
-        $asOf      = Carbon::now()->startOfDay();
-        $ref       = $toDate ? Carbon::parse($toDate)->startOfDay() : $asOf->copy();
-        $startDate = $fromDate ?? $ref->copy()->startOfMonth()->format('Y-m-d');
-        $endDate   = ($ref->gt($asOf) ? $asOf : $ref)->format('Y-m-d');
-        $queries   = [];
+        $asOf  = Carbon::now()->startOfDay();
+        $end   = $toDate ? Carbon::parse($toDate)->startOfDay() : $asOf->copy();
+        $start = $fromDate
+            ? Carbon::parse($fromDate)->startOfDay()
+            : $end->copy()->startOfMonth();
+        if ($start->gt($end)) {
+            [$start, $end] = [$end->copy(), $start->copy()];
+        }
+
+        $rangeEnd = ($end->gt($asOf) ? $asOf : $end)->format('Y-m-d');
+        $rangeStart = $start->format('Y-m-d');
+        [$monthStart, $monthEnd] = $this->forecastMonthBounds($start, $end);
+        $monthEndClamped = ($monthEnd->gt($asOf) ? $asOf : $monthEnd)->format('Y-m-d');
+        $monthStartDate  = $monthStart->format('Y-m-d');
+
+        $queries = [];
+        $seen    = [];
         foreach ($oids as $oid) {
             if (!$oid) {
                 continue;
             }
-            $queries[] = ['oid' => $oid, 'start' => $startDate, 'end' => $endDate];
+            foreach ([
+                [$rangeStart, $rangeEnd],
+                [$monthStartDate, $monthEndClamped],
+            ] as [$from, $to]) {
+                $key = $oid . '|' . $from . '|' . $to;
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $queries[] = ['oid' => $oid, 'start' => $from, 'end' => $to];
+            }
         }
         $this->erp->getTotalSalesValuesBatch($queries);
     }

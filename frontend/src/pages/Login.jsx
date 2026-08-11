@@ -18,7 +18,7 @@ export default function Login({ onLogin }) {
       const data = await login(email, password);
       if (data.status) {
         onLogin?.();
-        navigate("/dashboard");
+        navigate("/dashboard", { replace: true });
       } else {
         setError(data.message || "Invalid credentials");
       }

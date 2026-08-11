@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowsPointingOutIcon, ChevronDownIcon, XMarkIcon } from "@heroicons/react/24/outline";
+import { ArrowsPointingOutIcon, ChevronDownIcon, LockClosedIcon, XMarkIcon } from "@heroicons/react/24/outline";
 import {
   flexRender,
   getCoreRowModel,
@@ -9,12 +9,11 @@ import {
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   FaBullseye,
   FaCalendarDay,
   FaChartLine,
-  FaChartPie,
   FaDollarSign,
   FaSort,
   FaSortDown,
@@ -24,7 +23,6 @@ import {
 import { useSearchParams } from "react-router-dom";
 
 import CommissionChart from "../components/dashboard/CommissionChart";
-import ForecastPieChart from "../components/dashboard/ForecastPieChart";
 import SalesVsTargetChart from "../components/dashboard/SalesVsTargetChart";
 import api from "../services/api";
 
@@ -110,6 +108,12 @@ function formatRangeLabel(from, to) {
   return `${a} – ${b}`;
 }
 
+function formatMonthLabel(ym) {
+  const [y, m] = (ym || "").split("-").map(Number);
+  if (!y || !m) return ym || "";
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
 const isYm = (v) => /^\d{4}-\d{2}$/.test(v || "");
 const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || "");
 
@@ -147,6 +151,11 @@ export default function Dashboard() {
   const [savingDays, setSavingDays] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [expandedChart, setExpandedChart] = useState(null); // "sales" | "commission" | null
+  const [daysOpen, setDaysOpen] = useState(false);
+  const [monthOpen, setMonthOpen] = useState(false);
+  const [pickerYear, setPickerYear] = useState(() => Number(initialSelection.month.split("-")[0]));
+  const daysPopoverRef = useRef(null);
+  const monthPopoverRef = useRef(null);
 
   const queryRange = useMemo(() => {
     if (mode === "month") {
@@ -203,6 +212,20 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [queryRange.from, queryRange.to, reloadKey]);
 
+  useEffect(() => {
+    if (!daysOpen && !monthOpen) return undefined;
+    const onPointerDown = (event) => {
+      if (daysOpen && !daysPopoverRef.current?.contains(event.target)) {
+        setDaysOpen(false);
+      }
+      if (monthOpen && !monthPopoverRef.current?.contains(event.target)) {
+        setMonthOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [daysOpen, monthOpen]);
+
   const stats = data?.stats || {};
   const teamPerf = data?.team_performance || [];
   const salesReps = data?.sales_reps || [];
@@ -216,6 +239,10 @@ export default function Dashboard() {
   const monthlyTarget = Number(stats.monthly_target || 0);
   const totalSales = Number(stats.total_sales || 0);
   const totalForecast = Number(stats.total_forecast || 0);
+  const forecastMonth = stats.forecast_month || month;
+  const forecastMonthTarget = Number(
+    stats.forecast_month_target != null ? stats.forecast_month_target : 0
+  );
 
   const dailyTarget = stats.daily_target != null
     ? Number(stats.daily_target)
@@ -227,13 +254,37 @@ export default function Dashboard() {
   const actualAchievement = stats.actual_achievement != null
     ? Number(stats.actual_achievement)
     : (monthlyTarget > 0 ? (totalSales / monthlyTarget) * 100 : 0);
-  const forecastAchievement = stats.forecast_achievement != null
-    ? Number(stats.forecast_achievement)
-    : (stats.achievement != null
-      ? Number(stats.achievement)
-      : (monthlyTarget > 0 ? (totalForecast / monthlyTarget) * 100 : 0));
+  const forecastAchievement = forecastMonthTarget > 0
+    ? (totalForecast / forecastMonthTarget) * 100
+    : (stats.forecast_achievement != null
+      ? Number(stats.forecast_achievement)
+      : 0);
 
   const rangeLabel = formatRangeLabel(queryRange.from, queryRange.to);
+  const daysGone = Number(stats.working_days_gone || 0);
+  const daysTotal = Number(stats.working_days_total || 0);
+  const daysRemain = Math.max(0, daysTotal - daysGone);
+  const daysPct = daysTotal > 0 ? Math.min(100, (daysGone / daysTotal) * 100) : 0;
+  const daysHint = stats.working_days_override
+    ? "saved override"
+    : "Fridays excluded";
+
+  const enterRangeMode = () => {
+    if (mode !== "range") {
+      const bounds = monthBounds(month);
+      setFromDate(bounds.from);
+      setToDate(bounds.to);
+      setApplied(bounds);
+    }
+    setDaysOpen(false);
+    setMonthOpen(false);
+    setMode("range");
+  };
+
+  const pickMonth = (year, monthIndex) => {
+    setMonth(`${year}-${pad(monthIndex)}`);
+    setMonthOpen(false);
+  };
 
   const applyCustomRange = () => {
     if (!fromDate || !toDate) return;
@@ -259,6 +310,7 @@ export default function Dashboard() {
         working_days: days,
       });
       setReloadKey((k) => k + 1);
+      setDaysOpen(false);
     } catch (e) {
       console.error(e);
       alert("Failed to save working days");
@@ -275,6 +327,7 @@ export default function Dashboard() {
         params: { year: y, month: m },
       });
       setReloadKey((k) => k + 1);
+      setDaysOpen(false);
     } catch (e) {
       console.error(e);
       alert("Failed to reset working days");
@@ -286,47 +339,140 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen space-y-4 bg-gray-100">
       {/* Header */}
-      <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Sales Dashboard</h1>
-          <p className="text-sm text-gray-500">Overview of sales performance and targets</p>
-        </div>
-
-        <div className="flex flex-col items-stretch gap-3 sm:items-end">
-          <div className="inline-flex rounded-lg border bg-white p-1 text-sm">
-            <button
-              type="button"
-              onClick={() => setMode("month")}
-              className={`rounded-md px-3 py-1.5 ${mode === "month" ? "bg-black text-white" : "text-gray-600 hover:bg-gray-50"}`}
-            >
-              Month
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (mode !== "range") {
-                  const bounds = monthBounds(month);
-                  setFromDate(bounds.from);
-                  setToDate(bounds.to);
-                  setApplied(bounds);
-                }
-                setMode("range");
-              }}
-              className={`rounded-md px-3 py-1.5 ${mode === "range" ? "bg-black text-white" : "text-gray-600 hover:bg-gray-50"}`}
-            >
-              Custom range
-            </button>
+      <div className="mb-8">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold">Sales Dashboard</h1>
+            <p className="text-sm text-gray-500">Overview of sales performance and targets</p>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            {mode === "month" ? (
+              <button
+                type="button"
+                onClick={enterRangeMode}
+                className="h-9 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-600 shadow-sm hover:border-gray-300 hover:text-gray-900"
+              >
+                Range
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setMode("month")}
+                className="h-9 rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-600 shadow-sm hover:border-gray-300 hover:text-gray-900"
+              >
+                Back to month
+              </button>
+            )}
+
+            {mode === "month" && (
+              <div className="relative" ref={daysPopoverRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDaysOpen((open) => !open);
+                    setMonthOpen(false);
+                  }}
+                  className={`h-9 rounded-lg border px-3 text-sm shadow-sm ${daysOpen ? "border-gray-900 bg-gray-900 text-white" : "border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:text-gray-900"}`}
+                >
+                  Days
+                </button>
+                {daysOpen && (
+                  <div className="absolute right-0 z-20 mt-2 w-64 rounded-xl border bg-white p-3 shadow-lg">
+                    <p className="text-sm font-medium text-gray-900">Working days</p>
+                    <p className="mt-0.5 text-xs text-gray-500">{daysHint}</p>
+                    <div className="mt-3 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={workingDaysInput}
+                        onChange={(e) => setWorkingDaysInput(e.target.value)}
+                        className="h-9 w-20 rounded-lg border px-3 text-sm text-gray-900"
+                      />
+                      <button
+                        type="button"
+                        onClick={saveWorkingDays}
+                        disabled={savingDays || loading}
+                        className="h-9 rounded-lg bg-black px-3 text-sm text-white hover:bg-gray-800 disabled:opacity-50"
+                      >
+                        {savingDays ? "Saving…" : "Save"}
+                      </button>
+                      {stats.working_days_override && (
+                        <button
+                          type="button"
+                          onClick={resetWorkingDays}
+                          disabled={savingDays || loading}
+                          className="h-9 rounded-lg border px-3 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          Use auto
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-gray-200/80 bg-white p-4 shadow-sm sm:p-5">
           {mode === "month" ? (
-            <div className="relative inline-block w-full min-w-[200px] sm:w-[220px]">
-              <input
-                type="month"
-                value={month}
-                onChange={(e) => setMonth(e.target.value)}
-                className="w-full cursor-pointer appearance-none rounded-lg border bg-white px-4 py-2 pr-10 text-sm"
-              />
-              <ChevronDownIcon className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-500" />
+            <div className="relative inline-block" ref={monthPopoverRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setPickerYear(Number(month.split("-")[0]));
+                  setMonthOpen((open) => !open);
+                  setDaysOpen(false);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-left hover:bg-gray-50"
+                aria-expanded={monthOpen}
+                aria-haspopup="dialog"
+              >
+                <span className="text-xl font-semibold tracking-tight text-gray-900">{formatMonthLabel(month)}</span>
+                <ChevronDownIcon className={`h-5 w-5 text-gray-400 transition ${monthOpen ? "rotate-180" : ""}`} />
+              </button>
+              {monthOpen && (
+                <div className="absolute left-0 z-20 mt-2 w-72 rounded-xl border bg-white p-3 shadow-lg">
+                  <div className="mb-2 flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setPickerYear((year) => year - 1)}
+                      className="h-8 w-8 rounded-lg text-gray-600 hover:bg-gray-100"
+                      aria-label="Previous year"
+                    >
+                      ‹
+                    </button>
+                    <p className="text-sm font-medium text-gray-900">{pickerYear}</p>
+                    <button
+                      type="button"
+                      onClick={() => setPickerYear((year) => year + 1)}
+                      className="h-8 w-8 rounded-lg text-gray-600 hover:bg-gray-100"
+                      aria-label="Next year"
+                    >
+                      ›
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {Array.from({ length: 12 }, (_, index) => {
+                      const monthIndex = index + 1;
+                      const selected = month === `${pickerYear}-${pad(monthIndex)}`;
+                      const label = new Date(pickerYear, index, 1).toLocaleDateString(undefined, { month: "short" });
+                      return (
+                        <button
+                          key={monthIndex}
+                          type="button"
+                          onClick={() => pickMonth(pickerYear, monthIndex)}
+                          className={`h-9 rounded-lg text-sm ${selected ? "bg-black text-white" : "text-gray-700 hover:bg-gray-100"}`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex flex-wrap items-end gap-2">
@@ -336,7 +482,7 @@ export default function Dashboard() {
                   type="date"
                   value={fromDate}
                   onChange={(e) => setFromDate(e.target.value)}
-                  className="rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
+                  className="h-9 rounded-lg border bg-white px-3 text-sm text-gray-900"
                 />
               </label>
               <label className="flex flex-col gap-1 text-xs text-gray-500">
@@ -345,61 +491,58 @@ export default function Dashboard() {
                   type="date"
                   value={toDate}
                   onChange={(e) => setToDate(e.target.value)}
-                  className="rounded-lg border bg-white px-3 py-2 text-sm text-gray-900"
+                  className="h-9 rounded-lg border bg-white px-3 text-sm text-gray-900"
                 />
               </label>
               <button
                 type="button"
                 onClick={applyCustomRange}
-                className="rounded-lg bg-black px-4 py-2 text-sm text-white hover:bg-gray-800"
+                className="h-9 rounded-lg bg-black px-4 text-sm text-white hover:bg-gray-800"
               >
                 Apply
               </button>
             </div>
           )}
 
-          {mode === "month" && (
-            <div className="flex flex-wrap items-end gap-2 rounded-lg border bg-white px-3 py-2">
-              <label className="flex flex-col gap-1 text-xs text-gray-500">
-                Working days
-                <input
-                  type="number"
-                  min={1}
-                  max={31}
-                  value={workingDaysInput}
-                  onChange={(e) => setWorkingDaysInput(e.target.value)}
-                  className="w-20 rounded-lg border px-3 py-1.5 text-sm text-gray-900"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={saveWorkingDays}
-                disabled={savingDays || loading}
-                className="rounded-lg bg-black px-3 py-1.5 text-sm text-white hover:bg-gray-800 disabled:opacity-50"
-              >
-                {savingDays ? "Saving…" : "Save"}
-              </button>
-              {stats.working_days_override && (
-                <button
-                  type="button"
-                  onClick={resetWorkingDays}
-                  disabled={savingDays || loading}
-                  className="rounded-lg border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                >
-                  Use auto
-                </button>
-              )}
+          {daysTotal > 0 && (
+            <div className="mt-4 flex flex-col gap-4 border-t border-gray-100 pt-4 sm:flex-row sm:items-stretch sm:gap-8">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-sm font-medium text-gray-900">
+                    {daysGone} / {daysTotal} working days
+                  </span>
+                  <span className="text-xs text-gray-400">
+                    {mode === "range" ? rangeLabel : daysHint}
+                  </span>
+                </div>
+                <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-gray-100">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-zinc-800 to-black transition-[width] duration-500"
+                    style={{ width: `${daysPct}%` }}
+                  />
+                </div>
+              </div>
+
+              <dl className="grid grid-cols-3 gap-2 sm:flex sm:w-56 sm:shrink-0 sm:flex-col sm:gap-1.5">
+                {[
+                  { label: "Working days", value: daysTotal, swatch: "bg-zinc-800" },
+                  { label: "Remain days", value: daysRemain, swatch: "bg-zinc-300" },
+                  { label: "Worked days", value: daysGone, swatch: "bg-black" },
+                ].map((row) => (
+                  <div
+                    key={row.label}
+                    className="flex items-center justify-between gap-3 rounded-xl bg-gray-50 px-3 py-2"
+                  >
+                    <dt className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                      <span className={`h-1.5 w-1.5 rounded-full ${row.swatch}`} />
+                      {row.label}
+                    </dt>
+                    <dd className="text-sm font-semibold tabular-nums text-gray-900">{row.value}</dd>
+                  </div>
+                ))}
+              </dl>
             </div>
           )}
-
-          <p className="text-xs text-gray-500">
-            {rangeLabel} · {workingDaysLabel}
-            {stats.working_days_override
-              ? " (saved)"
-              : stats.working_days_auto
-                ? ` (auto ${stats.working_days_auto}, Fridays excluded)`
-                : " (Fridays excluded)"}
-          </p>
         </div>
       </div>
 
@@ -425,22 +568,15 @@ export default function Dashboard() {
             <StatCard
               title="Total Forecast"
               value={fmt(stats.total_forecast)}
-              change={`${fmtPct(forecastAchievement)} of target (achievement)`}
+              change={`${fmtPct(forecastAchievement)} of ${formatMonthLabel(forecastMonth)} target`}
               icon={<FaChartLine />}
             />
-            <div className="rounded-2xl border bg-white p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-sm text-gray-500">Forecast Achievement</p>
-                <div className="rounded-lg bg-blue-50 p-2 text-blue-600">
-                  <FaChartPie />
-                </div>
-              </div>
-              <ForecastPieChart
-                forecast={totalForecast}
-                target={monthlyTarget}
-                compact
-              />
-            </div>
+            <ForecastAchievementCard
+              forecast={totalForecast}
+              target={forecastMonthTarget}
+              monthLabel={formatMonthLabel(forecastMonth)}
+              achievement={forecastAchievement}
+            />
           </div>
 
           {/* Charts */}
@@ -506,21 +642,6 @@ export default function Dashboard() {
             </ChartExpandModal>
           )}
 
-          {/* Team Performance */}
-          <div className="mb-10 rounded-2xl border bg-white p-6">
-            <h3 className="mb-6 font-medium">Team Performance Overview</h3>
-            {teamPerf.map((t) => (
-              <TeamRow
-                key={t.name}
-                name={t.name}
-                reps={t.reps}
-                members={t.members || []}
-                value={<>{fmt(t.sales)} / {fmt(t.target)}</>}
-                percent={t.percent}
-                warning={t.percent < 100}
-              />
-            ))}
-          </div>
 
           {/* Sales Reps Table */}
           <div className="rounded-2xl border bg-white p-6">
@@ -595,26 +716,99 @@ function SalesRepsTable({ data }) {
   );
 }
 
-const StatCard = ({ title, value, change, icon, changeClassName = "text-green-600" }) => (
+const StatCard = ({ title, value, change, icon, changeClassName = "text-gray-500" }) => (
   <div className="rounded-2xl border bg-white p-6">
     <div className="mb-3 flex items-center justify-between">
-      <p className="text-sm text-gray-500">{title}</p>
-      <div className="rounded-lg bg-blue-50 p-2 text-blue-600">{icon}</div>
+      <p className="text-base font-semibold text-gray-800">{title}</p>
+      <div className="rounded-md bg-gray-100 p-1.5 text-gray-500">{icon}</div>
     </div>
-    <p className="mb-1 text-xl font-semibold">{value}</p>
+    <p className="mb-1 text-2xl font-semibold tracking-tight text-gray-900">{value}</p>
     {change != null && change !== "" && (
       <p className={`text-sm ${changeClassName}`}>{change}</p>
     )}
   </div>
 );
 
+const ForecastAchievementCard = ({ forecast, target, monthLabel, achievement }) => {
+  const pct = Math.max(0, Number(achievement) || 0);
+  const hasTarget = Number(target) > 0;
+  const over = hasTarget && pct >= 100;
+  const onPace = hasTarget && pct >= 80;
+  const remaining = Math.max(0, Number(target) - Number(forecast));
+  const ringPct = Math.min(pct, 100);
+  const radius = 36;
+  const circ = 2 * Math.PI * radius;
+  const dash = (ringPct / 100) * circ;
+  const shortMonth = (monthLabel || "").replace(/\s+\d{4}$/, "") || monthLabel;
+  const tone = over
+    ? { text: "text-emerald-700", ring: "#059669", wash: "from-emerald-50 via-white to-teal-50", chip: "bg-emerald-600 text-white", bar: "bg-emerald-500", glow: "bg-emerald-300/50" }
+    : onPace
+      ? { text: "text-sky-700", ring: "#0284c7", wash: "from-sky-50 via-white to-indigo-50", chip: "bg-sky-600 text-white", bar: "bg-sky-500", glow: "bg-sky-300/50" }
+      : { text: "text-amber-700", ring: "#d97706", wash: "from-amber-50 via-white to-orange-50", chip: "bg-amber-600 text-white", bar: "bg-amber-500", glow: "bg-amber-300/50" };
+
+  return (
+    <div className={`relative overflow-hidden rounded-2xl border border-black/5 bg-gradient-to-br ${tone.wash} p-6`}>
+      <div className={`pointer-events-none absolute -right-6 -top-8 h-28 w-28 rounded-full ${tone.glow} blur-2xl`} />
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <p className="text-base font-semibold text-gray-800">Forecast Achievement</p>
+        <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold shadow-sm ${tone.chip}`}>
+          <LockClosedIcon className="h-3 w-3" />
+          {shortMonth}
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className={`text-[2rem] font-semibold leading-none tracking-tight ${tone.text}`}>
+            {hasTarget ? `${pct.toFixed(1)}%` : "—"}
+          </p>
+          <p className="mt-1.5 text-xs font-medium uppercase tracking-wide text-gray-500">
+            {over ? "Above month target" : onPace ? "On pace for month" : "Behind month pace"}
+          </p>
+        </div>
+        <div className="relative h-[88px] w-[88px] shrink-0">
+          <svg viewBox="0 0 88 88" className="-rotate-90 h-full w-full">
+            <circle cx="44" cy="44" r={radius} fill="none" stroke="rgba(15,23,42,0.08)" strokeWidth="8" />
+            <circle
+              cx="44"
+              cy="44"
+              r={radius}
+              fill="none"
+              stroke={tone.ring}
+              strokeWidth="8"
+              strokeLinecap="round"
+              strokeDasharray={`${dash} ${circ}`}
+              className="transition-[stroke-dasharray] duration-700 ease-out"
+            />
+          </svg>
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <span className={`text-xs font-bold ${tone.text}`}>{hasTarget ? `${Math.round(ringPct)}%` : "—"}</span>
+          </div>
+        </div>
+      </div>
+      <div className="mt-4">
+        <div className="mb-1.5 h-1.5 overflow-hidden rounded-full bg-black/10">
+          <div
+            className={`h-full rounded-full ${tone.bar} transition-[width] duration-700`}
+            style={{ width: `${hasTarget ? ringPct : 0}%` }}
+          />
+        </div>
+        <div className="flex items-center justify-between text-xs text-gray-600">
+          <span>{fmt(forecast)}</span>
+          <span className="text-gray-400">{over ? "over target" : <>{fmt(remaining)} left</>}</span>
+          <span>{fmt(target)}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const TargetCard = ({ target, achievement }) => (
   <div className="rounded-2xl border bg-white p-6">
     <div className="mb-3 flex items-center justify-between">
-      <p className="text-sm text-gray-500">Target</p>
-      <div className="rounded-lg bg-blue-50 p-2 text-blue-600"><FaBullseye /></div>
+      <p className="text-base font-semibold text-gray-800">Target</p>
+      <div className="rounded-md bg-gray-100 p-1.5 text-gray-500"><FaBullseye /></div>
     </div>
-    <p className="mb-3 text-xl font-semibold">{fmt(target)}</p>
+    <p className="mb-3 text-2xl font-semibold tracking-tight text-gray-900">{fmt(target)}</p>
     <div className="mb-2 h-2 rounded-full bg-gray-200">
       <div className="h-2 rounded-full bg-black" style={{ width: `${Math.min(achievement || 0, 100)}%` }} />
     </div>

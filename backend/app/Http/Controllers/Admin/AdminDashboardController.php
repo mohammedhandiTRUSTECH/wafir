@@ -59,6 +59,7 @@ class AdminDashboardController extends Controller
                 'forecast'    => $calc['forecast'],
                 'achievement' => $calc['achievement'],
                 'actual_achievement' => $calc['actual_achievement'],
+                'month_target'=> $calc['month_target'] ?? $calc['target'],
                 'commission_pct' => $calc['commission_pct'],
                 'commission'  => $calc['commission_amount'],
                 'success'     => $calc['achievement'] >= 100,
@@ -72,8 +73,8 @@ class AdminDashboardController extends Controller
                 'reps' => count($rows),
                 'sales' => round(collect($rows)->sum('actual'), 2),
                 'target' => round(collect($rows)->sum('target'), 2),
-                'percent' => collect($rows)->sum('target') > 0
-                    ? round((collect($rows)->sum('forecast') / collect($rows)->sum('target')) * 100, 2)
+                'percent' => collect($rows)->sum('month_target') > 0
+                    ? round((collect($rows)->sum('forecast') / collect($rows)->sum('month_target')) * 100, 2)
                     : 0,
                 'members' => collect($rows)->map(fn($r) => [
                     'id'     => $r['id'],
@@ -88,6 +89,17 @@ class AdminDashboardController extends Controller
 
         $dailySales    = $this->svc->getAggregatedDailySalesByRange($allOids, $fromDate, $toDate);
         $periodTarget  = round(collect($repRows)->sum('target'), 2);
+        [$forecastMonthStart, $forecastMonthEnd] = $this->svc->forecastMonthBounds($from, $to);
+        $forecastMonthTarget = 0.0;
+        foreach ($salesReps as $person) {
+            $forecastMonthTarget += $this->svc->rangeTarget(
+                $person['name'],
+                (int) $person['id'],
+                $forecastMonthStart,
+                $forecastMonthEnd
+            );
+        }
+        $forecastMonthTarget = round($forecastMonthTarget, 2);
         // The target is a whole-month figure, so spread it over the months it belongs to
         // rather than over the (possibly partial) selected range.
         $targetDays     = $this->svc->workingDaysInCoveredMonths($from, $to, $asOf)['total'];
@@ -104,9 +116,9 @@ class AdminDashboardController extends Controller
             ? round($totalSales / $workingDays['gone'], 2)
             : 0.0;
 
-        // Forecast achievement (projected) — used for commission / pace.
-        $forecastAchievement = $periodTarget > 0
-            ? round(($totalForecast / $periodTarget) * 100, 2)
+        // Forecast achievement (projected) — always vs the calendar-month target.
+        $forecastAchievement = $forecastMonthTarget > 0
+            ? round(($totalForecast / $forecastMonthTarget) * 100, 2)
             : 0.0;
         // Actual achievement — sales so far vs target.
         $actualAchievement = $periodTarget > 0
@@ -126,6 +138,8 @@ class AdminDashboardController extends Controller
                     'actual_achievement'  => $actualAchievement,
                     'avg_daily_sales'     => $avgDaily,
                     'total_forecast'      => round($totalForecast, 2),
+                    'forecast_month'      => $forecastMonthStart->format('Y-m'),
+                    'forecast_month_target' => $forecastMonthTarget,
                     'working_days_total'  => $workingDays['total'],
                     'working_days_gone'   => $workingDays['gone'],
                     'working_days_auto'   => $workingDays['auto_total'],
